@@ -1,0 +1,80 @@
+CREATE OR REPLACE PACKAGE stock_comparison_pkg AS
+    PROCEDURE process_files(exchange_filepath IN VARCHAR2, depository_filepath IN VARCHAR2);
+END stock_comparison_pkg;
+/
+
+CREATE OR REPLACE PACKAGE BODY stock_comparison_pkg AS
+
+    PROCEDURE load_csv_to_table(filepath IN VARCHAR2, source IN VARCHAR2) IS
+        v_line VARCHAR2(32767);
+        v_user_id VARCHAR2(50);
+        v_stock_id VARCHAR2(50);
+        v_stock_name VARCHAR2(100);
+        v_stock_count NUMBER;
+        v_file UTL_FILE.FILE_TYPE;
+        v_csv_line VARCHAR2(32767);
+    BEGIN
+        v_file := UTL_FILE.FOPEN('CSV_DIR', filepath, 'R');
+        
+        LOOP
+            BEGIN
+                UTL_FILE.GET_LINE(v_file, v_csv_line);
+                -- Parse CSV line (assuming it is well-formed and comma-separated)
+                v_user_id := SUBSTR(v_csv_line, 1, INSTR(v_csv_line, ',') - 1);
+                v_csv_line := SUBSTR(v_csv_line, INSTR(v_csv_line, ',') + 1);
+                
+                v_stock_id := SUBSTR(v_csv_line, 1, INSTR(v_csv_line, ',') - 1);
+                v_csv_line := SUBSTR(v_csv_line, INSTR(v_csv_line, ',') + 1);
+                
+                v_stock_name := SUBSTR(v_csv_line, 1, INSTR(v_csv_line, ',') - 1);
+                v_csv_line := SUBSTR(v_csv_line, INSTR(v_csv_line, ',') + 1);
+                
+                v_stock_count := TO_NUMBER(v_csv_line);
+                
+                -- Insert into appropriate table
+                IF source = 'EXCHANGE' THEN
+                    INSERT INTO stock_ownership_exchange (user_id, stock_id, stock_name, stock_count)
+                    VALUES (v_user_id, v_stock_id, v_stock_name, v_stock_count);
+                ELSE
+                    INSERT INTO stock_ownership_depository (user_id, stock_id, stock_name, stock_count)
+                    VALUES (v_user_id, v_stock_id, v_stock_name, v_stock_count);
+                END IF;
+                
+            EXCEPTION
+                WHEN OTHERS THEN
+                    -- Handle CSV format errors or insert errors
+                    NULL; -- Add proper logging if necessary
+            END;
+        END LOOP;
+        
+        UTL_FILE.FCLOSE(v_file);
+    END load_csv_to_table;
+
+    PROCEDURE process_files(exchange_filepath IN VARCHAR2, depository_filepath IN VARCHAR2) IS
+    BEGIN
+        -- Load data from CSVs into tables
+        load_csv_to_table(exchange_filepath, 'EXCHANGE');
+        load_csv_to_table(depository_filepath, 'DEPOSITORY');
+
+        -- Compare records between tables
+        FOR rec IN (SELECT e.user_id, e.stock_id, e.stock_count AS exchange_count, d.stock_count AS depository_count
+                     FROM stock_ownership_exchange e
+                     FULL OUTER JOIN stock_ownership_depository d
+                     ON e.user_id = d.user_id AND e.stock_id = d.stock_id
+                     WHERE NVL(e.stock_count, 0) != NVL(d.stock_count, 0)) LOOP
+            
+            -- Log mismatches
+            INSERT INTO stock_mismatch_log (user_id, stock_id, exchange_count, depository_count, mismatch_reason)
+            VALUES (rec.user_id, rec.stock_id, rec.exchange_count, rec.depository_count, 'Count mismatch');
+        END LOOP;
+
+        -- Additional logging for missing records can be implemented here
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- Handle general errors (e.g., missing files)
+            NULL; -- Add proper logging if necessary
+    END process_files;
+
+END stock_comparison_pkg;
+/
